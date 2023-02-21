@@ -1,0 +1,625 @@
+---
+title: "R Notebook for Team Case 3"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+```{r}
+##Data Cleaning
+
+### Case: 2008 Democratic Primaries - Clinton vs. Obama
+########################################################
+source(file.choose())
+# read data into R
+election_data <- read.csv(file.choose())
+
+# Next use the function summary to inspect the data
+summary(election_data)
+head(election_data)
+##############################################
+# Cleaning up the data
+# Write a function that replaces NAs with the mean of the non-missing data 
+# in the column. This function can be called for different data sets to 
+# impute the data.
+impute_data <- function(vec, mn) {
+  ifelse(is.na(vec), mn, vec)
+}
+# Find the means for all the numeric columns. 
+# The function sapply automatically runs the mean function 
+# (specified as second argument) on the columns 10 through 41. 
+# The means are then saved in the vector named train_data_mean. 
+# We use the argument na.rm=TRUE to ask the function to ignore NA entries.
+data_mean <- sapply(election_data[,10:41],mean, na.rm=TRUE)
+
+# Run this command to look at means for all the columns we found by running the sapply function
+(data_mean)
+
+# Impute the missing data. Loop through all the rows and 
+# for each column call the function impute_train_data.
+for(i in 10:41) {
+  election_data[,i]<-impute_data(election_data[,i],data_mean[i-9])
+}
+# Run the summary function again. Now you see that no demographic/county columns have NA entries.
+summary(election_data)
+
+# Create two separate data sets from the data in electionData.
+election_data$ElectionDate <- as.Date(election_data$ElectionDate, format="%m/%d/%Y")
+election_data_train <- election_data[election_data$ElectionDate < as.Date("2/19/2008", format="%m/%d/%Y"), ]
+election_data_test <- election_data[election_data$ElectionDate >= as.Date("2/19/2008", format="%m/%d/%Y"), ]
+
+# If you want to write these data sets back out into spreadsheets, 
+# use the following "write" commands in R.
+# write.csv(electionDataTrain, "electionDataTrain.csv")
+# write.csv(electionDataTest, "electionDataTest.csv")
+
+##########################################################
+### End of Data Cleaning up
+##########################################################
+#
+# Create some possible variables that might be of interest.
+# (things we might like to predict in a regression using the demographic information). 
+# These variables directly become a part of our data set election_data_train. You can use the command names(election_data_train) to see that these are added as columns in our data set.
+election_data_train$Obama_margin <- election_data_train$Obama - election_data_train$Clinton
+election_data_train$Obama_margin_percent <- 100*election_data_train$Obama_margin/election_data_train$TotalVote
+election_data_train$Obama_wins <- ifelse(election_data_train$Obama_margin >0, 1,0)
+names(election_data_train)
+###
+### Based on the data, to account for the size of possible delegates on each county
+### we will work with election_data_train$Obama_margin_percent to be the target out models.
+###
+
+
+```
+
+
+```{r}
+### Question 1: Provide a visualization (very flexible format, 
+### it does not need to be related to the election)
+### 
+
+max_perc = 82.8
+d <- data.frame(Percent=rep(0,max_perc), Likelihood=rep(0,max_perc))
+for (i in 1:max_perc){
+  da <- subset(election_data_train, subset=Black>=i)
+  d[i,1] = i
+  d[i,2] = mean(da$Obama_wins)
+}
+library(ggplot2)
+ggplot() +
+  geom_line(d, mapping=aes(x=Percent, y=Likelihood)) +
+  ggtitle('Obama Winning Likelihood Based on Percentage of Black Population') + xlab("Percentage of Black Population") + ylab("Likelihood of Obama Winning")
+
+##Additional Visualizations
+
+### MAP PLOT
+plot_data_map<-data.frame(election_data$State,election_data$TotalVote)
+plot_data_map_2<-aggregate(plot_data_map$election_data.TotalVote,list(plot_data_map$election_data.State), FUN=sum , na.rm = TRUE)
+  
+
+library(ggplot2)
+library(plotly)
+map_plot<- plot_geo(plot_data_map_2,locationmode='USA-states') %>%
+  add_trace(locations= ~Group.1, z= ~x, color = ~x, colorscale='Cividis') %>%
+  layout(geo=list(scope='usa'))
+map_plot
+
+##On hovering over the map over the states, we caan get the total votes cast in that state
+
+```
+
+
+
+```{r}
+###
+### Question 2: Prediction. No additional script beyond the cleaning up the data
+### provided above. (Hint: FIPS variable bahaves as an identifier or each observation
+### so you might not want to include it in a linear regression.)
+
+library(randomForest)
+library(libcoin)
+library(partykit)
+library(glmnet)
+
+# We drop the columns since they will not help us with our predictive modeling and the columns "County", "State" won't be helpful because the test set has new states that are YET to vote. Hence, they provide no value. "FIPS" is a unique identifier and hence needs to be dropped. The columns " Total Vote", "Clinton", "Obama", "Obama_margin" is what determines what we're trying to predict so they will skew the model, and hence are dropped too. 
+
+cols_to_drop <- c("County", "State", "Region", "FIPS", "ElectionDate", "ElectionType", 
+                  "Obama_wins", "TotalVote", "Clinton", "Obama", "Obama_margin")
+# Our new dataset without the columns specified above. 
+train_data <- election_data_train[,!(names(election_data_train) %in% cols_to_drop)]
+
+# Matrices for regression
+Mx <- model.matrix(train_data$Obama_margin_percent ~ ., data = train_data)[,-1]
+My <- train_data$Obama_margin_percent
+
+
+##Lasso solving for all the values of lambda
+lasso <- glmnet(Mx,My, family="gaussian")
+##This provides the summary for all the values of lambda we were able to get.
+summary(lasso)
+
+# Finding optimal value of lambda for lasso
+
+# 1) Lambda Theory
+num.features <- ncol(Mx)
+n <- nrow(Mx)
+num.Obama_wins <- sum(My > 0)
+w <- (num.Obama_wins/n)*(1-(num.Obama_wins/n))
+#### Although this is not a binomial case, we can treat the spread margin as an indication that Obama will win when margin>0 and Obama will lose otherwise. Hence, the theoretically valid choice is: 
+lambda.theory <- sqrt(w*log(num.features/0.05)/n)
+
+lassoTheory <- glmnet(Mx,My, family="gaussian",lambda = lambda.theory)
+
+
+# 2) Using Cross Validation, searching for the lambda value
+lassoCV <- cv.glmnet(Mx, My, family = "gaussian")
+
+# Plotting the fitting graph 
+par(mar=c(1.5,1.5,2,1.5))
+par(mai=c(1.5,1.5,2,1.5))
+plot(lassoCV, main="Fitting Graph for CV Lasso \n \n # of non-zero coefficients  ", xlab = expression(paste("log(",lambda,")")))
+
+# We will also take the minimum of the mean values stored in lambda.min
+# and 1se to the right stored in lambda.1se
+lambda.min <- lassoCV$lambda.min
+lambda.1se <- lassoCV$lambda.1se
+
+## Using K- Fold Cross Validation with 10 folds
+nfold <- 10
+foldid <- rep(1:nfold, each = ceiling(n/nfold))[sample(1:n)]
+
+## Out of Sample Validation 
+
+## Creating an empty dataset
+OOS <- data.frame(PL.min=rep(NA,nfold), PL.1se=rep(NA,nfold), PL.theory=rep(NA,nfold),
+                  L.min=rep(NA,nfold), L.1se=rep(NA,nfold), L.theory=rep(NA,nfold),
+                  LM=rep(NA,nfold), LM_Int=rep(NA,nfold), RF=rep(NA,nfold)) 
+
+## These are the features and the feature lengths generated by the lasso model for the min, 1se and theory values 
+features.min <- support(lasso$beta[,which.min(lassoCV$cvm)])
+length(features.min)
+features.1se <- support(lasso$beta[,which.min( (lassoCV$lambda-lassoCV$lambda.1se)^2)])
+length(features.1se) 
+features.theory <- support(lassoTheory$beta)
+length(features.theory)
+
+## Subsetting the data according to the lamda values from min, 1se and theory.
+data.min <- data.frame(Mx[,features.min],My)
+data.1se <- data.frame(Mx[,features.1se],My)
+data.theory <- data.frame(Mx[,features.theory],My)
+
+## Performing the Cross Validation for all the models
+
+for(k in 1:nfold){ 
+  train <- which(foldid!=k) # train on all but fold `k'
+  
+  ### Post Lasso Estimates
+  rmin <- glm(My~., data = data.min, subset = train, family="gaussian")
+  if ( length(features.1se) == 0) {  
+    r1se <- glm(Obama_margin_percent~mean(Obama_margin_percent), data=data.min, subset=train, family="gaussian") 
+  } 
+  else {r1se <- glm(My~., data=data.1se, subset=train, family="gaussian")
+  }
+  
+  if ( length(features.theory) == 0){ 
+    rtheory <- glm(Obama_margin_percent~mean(Obama_margin_percent), data=data.min, subset=train, family="gaussian") 
+  } else {rtheory <- glm(My~., data=data.theory, subset=train, family="gaussian") }
+  
+  ## Predictions for the lamda values from min, 1se and theory
+  predmin <- predict(rmin, newdata=data.min[-train,])
+  pred1se  <- predict(r1se, newdata=data.1se[-train,])
+  predtheory <- predict(rtheory, newdata=data.theory[-train,])
+  
+  ## The out of sample R2 values
+  OOS$PL.min[k] <- R2(y=My[-train], pred=predmin, family="gaussian")
+  OOS$PL.1se[k] <- R2(y=My[-train], pred=pred1se, family="gaussian")
+  OOS$PL.theory[k] <- R2(y=My[-train], pred=predtheory, family="gaussian")
+  
+  
+  ### Lasso Regression using 3 lamda values
+  lassoMin  <- glmnet(Mx[train,], My[train], family="gaussian", lambda = lambda.min)
+  lasso1se  <- glmnet(Mx[train,], My[train], family="gaussian", lambda = lambda.1se)
+  lassoTheory <- glmnet(Mx[train,], My[train], family="gaussian", lambda = lambda.theory)
+  
+  predlassomin <- predict(lassoMin, newx=Mx[-train,])
+  predlasso1se  <- predict(lasso1se, newx=Mx[-train,])
+  predlassotheory <- predict(lassoTheory, newx=Mx[-train,])
+  
+  OOS$L.min[k] <- R2(y=My[-train], pred=predlassomin, family="gaussian")
+  OOS$L.1se[k] <- R2(y=My[-train], pred=predlasso1se, family="gaussian")
+  OOS$L.theory[k] <- R2(y=My[-train], pred=predlassotheory, family="gaussian")
+  
+  ## Using 3 other models:  Linear Model with and without interactions and Random Forest
+  LM <- glm(Obama_margin_percent ~., data = train_data, subset = train, family = "gaussian")
+  LM_Int <- glm(Obama_margin_percent ~.^2, data = train_data, subset = train, family = "gaussian")
+  RF <- randomForest(Obama_margin_percent ~ ., data = train_data, subset = train, importance = TRUE)
+  
+  predLM <- predict(LM, newdata=train_data[-train,])
+  predLM_Int <- predict(LM_Int, newdata=train_data[-train,])
+  predRF <- predict(RF, newdata=train_data[-train,])
+  
+  OOS$LM[k] <- R2(y=train_data$Obama_margin_percent[-train], pred=predLM, family="gaussian")
+  OOS$LM_Int[k] <- R2(y=train_data$Obama_margin_percent[-train], pred=predLM_Int, family="gaussian")
+  OOS$RF[k] <- R2(y=train_data$Obama_margin_percent[-train], pred=predRF, family="gaussian")
+  
+  print(k)
+}
+
+##A barplot that shows the Average
+par( mar=  c(8, 4, 4, 2) + 0.6 )
+barplot(colMeans(OOS), las=2,xpd=FALSE, ylim=c(0,1) , xlab="", ylab = bquote( "Average Out of Sample " ~ R^2), main="Aggregated OOS R Squared Performance")
+
+##Generating plots to determine and compare the models
+par( mar=  c(8, 4, 4, 2) + 0.6 )
+boxplot(OOS, las=2,xpd=FALSE, ylim=c(0,1) , xlab="", ylab = bquote( "Boxplot Out of Sample " ~ R^2), main="Boxplot comparing models after 10-Fold Cross Validation")
+
+
+### Clearly Random Forest is the winner. Fitting the model using Random Forest
+RF_Final <- randomForest(Obama_margin_percent ~ ., data = train_data, importance = TRUE)
+
+### Predicting spread using Random Forest
+
+test_data <- election_data_test[, !(names(election_data_test) %in% names(election_data_test[, c(1:9)]))]
+
+predict_test <- predict(RF_Final, newdata = test_data)
+
+Obama_win<-ifelse(predict_test>0,1,0)
+
+predict_test<-cbind(predict_test,Obama_win)
+
+
+```
+
+
+```{r}
+###
+### Question 3: Keep in mind that unsupervised learning 
+### is used to explore the data. Feel free to consider only a subset of the 
+### demographic variables. 
+###
+
+#Applying PCA
+installpkg("plfm")
+library(plfm)
+
+Labels_Data<- labels(election_data_train[1,])
+Labels_Data
+
+Data_PCA<- subset(election_data_train, select =  - c(County, State,FIPS, Region,ElectionDate,
+                                                     ElectionType,TotalVote,
+      
+                                                    
+                                                    Clinton,Obama,Obama_wins,Obama_margin_percent,Obama_margin))
+Data_PCA
+pca.electionData<- prcomp(Data_PCA, scale=TRUE)
+
+ncol(Data_PCA)
+ncol(election_data_train)
+pca.electionData
+
+
+##Importance of components
+summary(pca.electionData)
+
+library(ggplot2)
+plot(pca.electionData,main="PCA: Variance of the Votes Explained by Factors", xlab = "Factors")
+mtext(side=1, "Factors Affecting the Votes",  line=1, font=2)
+
+
+##Drawing a biplot
+
+install.packages("ggfortify")
+library(ggfortify)
+autoplot(stats::prcomp(Data_PCA, scale=TRUE), label = FALSE, loadings.label = TRUE, main = "BiPlot : Variables of PC1 and PC2")
+
+
+#PC score of each vote
+prediction_Election<-predict(pca.electionData)
+prediction_Election
+#Picking the first four PC scores to interpret the votes
+#PC1 Vs PC2
+plot(prediction_Election[,1:2], pch=21,  main="PC1 and PC2 Impact on Votes")
+
+
+plot(pca.electionData$rotation[,1:4], bg="black", cex=1, pch=21,  main="Loadings Plot")
+text(pca.electionData$rotation[,1:4],             
+     labels=rownames(pca.electionData$rotation))
+
+
+
+#PC3 Vs PC4
+plot(prediction_Election[,3:4], pch=21,  main="PC3 and PC4 Impact on Votes")
+
+
+
+
+##calculating variance explained by each principal component
+Var_Electiondata<-pca.electionData$sdev^2 / sum(pca.electionData$sdev^2)
+Var_Electiondata
+##Creating a scree plot:  plot that displays the total variance explained by each principal component – to visualize the results of PCA
+Var_Electiondata_X<-Var_Electiondata[1:15]
+Var_Electiondata_X
+
+qplot (c(1:15),Var_Electiondata_X) + 
+  geom_line() + 
+  xlab("Principal Component") + 
+  ylab("Variance Explained") +
+  ggtitle("Total Variance in the Dataset Explained by Each Principal Component") +
+  ylim(0, 0.3)
+
+
+#### trying out the 2dPCA plot from the 30 feature dataset
+election_data_train$Obama_wins
+install.packages("factoextra")
+
+library("factoextra")
+
+Who_Won <- c()
+for (i in 1:1737) {
+  
+  if (election_data_train$Obama_wins[i]>0) {
+    a = "Obama"
+  }
+  else  {
+    a = "Clinton"
+  }
+  Who_Won<-append(Who_Won,a)
+}
+
+Who_Won
+
+election_data_train_Viz<-data.frame(election_data_train,Who_Won)
+head(election_data_train_Viz)
+
+pca.electionData
+fviz_pca_ind(pca.electionData, geom.ind = "point", pointshape = 21, 
+             pointsize = 2, 
+             fill.ind = election_data_train_Viz$Who_Won, 
+             col.ind = "black", 
+             palette = "jco", 
+             addEllipses = TRUE,
+             label = "var",
+             col.var = "black",
+             repel = TRUE,
+             legend.title = "Candidate") +
+  ggtitle("2D PCA-plot from 32 feature dataset") +
+  theme(plot.title = element_text(hjust = 0.5))
+
+##Interpreting the four factors by looking at loadings (AKA
+##correlation of each factor with the original feature)
+loadings <- pca.electionData$rotation[,1:10]
+loadings
+
+### For each factor lets display the top features that 
+### are responsible for 3/4 of the squared norm of the loadings
+
+#PC1
+L1<-loadings[order(abs(loadings[,1]), decreasing=TRUE)[1:27],1]
+loadingfit <- lapply(1:27, function(k) ( t(L1[1:k])%*%L1[1:k] - 3/4 )^2)
+L1[1:which.min(loadingfit)]
+
+#PC2
+L2<-loadings[order(abs(loadings[,2]), decreasing=TRUE)[1:27],2]
+loadingfit <- lapply(1:27, function(k) ( t(L2[1:k])%*%L2[1:k] - 3/4 )^2)
+L2[1:which.min(loadingfit)]
+
+#PC3
+
+L3<-loadings[order(abs(loadings[,3]), decreasing=TRUE)[1:27],3]
+loadingfit <- lapply(1:27, function(k) ( t(L3[1:k])%*%L3[1:k] - 3/4 )^2)
+L3[1:which.min(loadingfit)]
+
+
+#PC4
+
+L4<-loadings[order(abs(loadings[,4]), decreasing=TRUE)[1:27],4]
+loadingfit <- lapply(1:27, function(k) ( t(L4[1:k])%*%L4[1:k] - 3/4 )^2)
+L4[1:which.min(loadingfit)]
+```
+
+
+```{r}
+
+##Question 4(a) impact of changing hispanic demographic
+###
+### We are making assumption that the increase of 5% in Hispanic population will not change other variables in the data
+Hispanic <- test_data$Hispanic + 5
+new_df_test_hisp <- cbind(test_data, Hispanic)[, -10]
+
+
+HispanicSimple <- glm(Obama_margin_percent ~ Hispanic, data = election_data_train )
+summary(HispanicSimple)
+
+## From this simple model we can infer that increase in 5% in Hispanic population will lead to 0.55% decrease in Obama winning percentage
+## If we want to assess the increase of 5% of Hispanic in our model, we will compare what would Obama's percent change would be
+
+previous_mean <- mean(predict_test$predict_test)
+new_mean <- mean(predict(RF_Final, newdata = new_df_test_hisp))
+
+## So, according to our model, an increase of 5% in Hispanic demographic will reduce Obama's average winning percentage by 0.2% 
+## Comparing to our simple model predicting 0.55% decrease in Obama's marginal percent, our model predicts a negative 0.2%
+
+
+####
+### Question 4(b) impact of changing black demographic
+### Here weare also assuming that Conditional Independance Assumption holds
+
+Black <- test_data$Black + 5
+new_df_test_black <- cbind(test_data, Black)[, -6]
+
+
+BlackSimple <- glm( Obama_margin_percent ~ Black, data = election_data_train )
+summary(BlackSimple)
+
+## From this simple model we can infer that increase in 5% in Black population will lead to 4.3% increase in Obama winning percentage
+## In order to assess the average impact of Obama's winning spread with an increase of 5% of Black population, 
+## we will compare the mean Obama margin percent with original 
+
+previous_mean <- mean(predict_test$predict_test)
+new_mean <- mean(predict(RF_Final, newdata = new_df_test_black))
+
+## So, according to our model, an increase of 5% in Black demographic will increase Obama's average winning percentage by 0.6%
+## Comparing to the simple model predicting 4.3% decrease in Obama's marginal percent, our model predicts a 0.6% increase
+
+```
+
+
+
+```{r}
+####
+#### Question 5: No additional R code. Keep in mind that you can build upon your previous 
+#### analysis or develop new analysis.
+####
+
+cols_to_drop <- c("County", "State", "Region", "FIPS", "ElectionDate", "ElectionType", 
+                  "Obama_wins", "TotalVote", "Clinton", "Obama", "Obama_margin")
+# Our new dataset without the columns specified above. 
+train_data <- election_data_train[,!(names(election_data_train) %in% cols_to_drop)]
+
+library(randomForest)
+
+### Clearly Random Forest is the winner. Fitting the model using Random Forest
+RF_Final <- randomForest(Obama_margin_percent ~ ., data = train_data, importance = TRUE)
+
+### Predicting spread using Random Forest
+
+test_data <- election_data_test[, !(names(election_data_test) %in% names(election_data_test[, c(1:9)]))]
+
+predict_test <- predict(RF_Final, newdata = test_data)
+predict_test<-data.frame(predict_test)
+
+predict_test<-data.frame(test_data,predict_test)
+
+
+Who_Won <- c()
+for (i in 1:1131) {
+  
+  if (predict_test$predict_test[i]>0) {
+    a = "0"
+  }
+  else  {
+    a = "1"
+  }
+  Who_Won<-append(Who_Won,a)
+}
+
+Who_Won
+
+predict_test<-cbind(predict_test,Who_Won)
+predict_test<-cbind(predict_test,election_data_test$County, election_data_test$State)
+
+hist(predict_test$predict_test, main="Histogram of our Predicted Values", xlab = "Predicted Value")
+
+ClintonWins<-aggregate(as.numeric(predict_test$Who_Won),list(predict_test$`election_data_test$State`),sum)
+Total<- aggregate(predict_test$`election_data_test$County`,list(predict_test$`election_data_test$State`),length)
+Statewise<-data.frame(ClintonWins,Total)
+names(Statewise)[1]<-paste("State")
+names(Statewise)[2]<-paste("Clinton_Wins")
+names(Statewise)[3]<-paste("State")
+names(Statewise)[4]<-paste("Total_County")
+b<-c(Statewise$Total_County-Statewise$Clinton_Wins)
+Statewise<-cbind(Statewise,b)
+names(Statewise)[5]<-paste("Obama_Wins")
+
+
+##library(dplyr)
+
+##predict_test2<-filter(predict_test)
+
+## Plotting for different demographics 
+## Plot 1: Ethinicity - White
+max_perc = 90
+d <- data.frame(Percent=rep(0,max_perc), Likelihood=rep(0,max_perc))
+for (i in 1:max_perc){
+    da <- subset(election_data_train, subset=White>=i)
+    d[i,1] = i
+    d[i,2] = mean(da$Obama_wins)
+}
+ggplot() +
+    geom_line(d, mapping=aes(x=Percent, y=Likelihood)) +
+    ggtitle('Obama Winning Likelihood Based on White Percentage')+ xlab("Percentage of White Population in a County") + ylab("Likelihood of Obama Winning")
+
+##Plot 2: Ethnicity - Hispanic
+max_perc = 90
+d <- data.frame(Percent=rep(0,max_perc), Likelihood=rep(0,max_perc))
+for (i in 1:max_perc){
+    da <- subset(election_data_train, subset=Hispanic>=i)
+    d[i,1] = i
+    d[i,2] = mean(da$Obama_wins)
+}
+ggplot() +
+    geom_line(d, mapping=aes(x=Percent, y=Likelihood)) +
+    ggtitle('Obama Winning Likelihood Based on Hispanic Percentage')+ xlab("Percentage of Hispanic Population in a County") + ylab("Likelihood of Obama Winning")
+
+##Plot 3: Ethnicity - Black
+max_perc = 60
+d <- data.frame(Percent=rep(0,max_perc), Likelihood=rep(0,max_perc))
+for (i in 1:max_perc){
+    da <- subset(election_data_train, subset=Black>=i)
+    d[i,1] = i
+    d[i,2] = mean(da$Obama_wins)
+}
+ggplot() +
+    geom_line(d, mapping=aes(x=Percent, y=Likelihood)) +
+    ggtitle('Obama Winning Likelihood Based on Black Percentage')+ xlab("Percentage of Black Population in a County") + ylab("Likelihood of Obama Winning")
+
+##Plot 4: Income Level HomeOwner Percentage
+max_perc = 90
+d <- data.frame(Percent=rep(0,max_perc), Likelihood=rep(0,max_perc))
+for (i in 1:max_perc){
+    da <- subset(election_data_train, subset=Homeowner>=i)
+    d[i,1] = i
+    d[i,2] = mean(da$Obama_wins)
+}
+ggplot() +
+    geom_line(d, mapping=aes(x=Percent, y=Likelihood)) +
+    ggtitle('Obama Winning Likelihood Based on Homeowner Percentage')+ xlab("Percentage of people that are Homeowners") + ylab("Likelihood of Obama Winning")
+
+##Plot 5: Income Level greater than 75k
+max_perc = 50
+d <- data.frame(Percent=rep(0,max_perc), Likelihood=rep(0,max_perc))
+for (i in 1:max_perc){
+    da <- subset(election_data_train, subset=IncomeAbove75K>=i)
+    d[i,1] = i
+    d[i,2] = mean(da$Obama_wins)
+}
+ggplot() +
+    geom_line(d, mapping=aes(x=Percent, y=Likelihood)) +
+    ggtitle('Obama Winning Likelihood Based on Individuals with Income Level Greater than 75k Percentage')+ xlab("Percentage of people that are Homeowners") + ylab("Likelihood of Obama Winning")
+
+##Plot 6: High School Percentage 
+max_perc = 90
+d <- data.frame(Percent=rep(0,max_perc), Likelihood=rep(0,max_perc))
+for (i in 1:max_perc){
+    da <- subset(election_data_train, subset=HighSchool>=i)
+    d[i,1] = i
+    d[i,2] = mean(da$Obama_wins)
+}
+ggplot() +
+    geom_line(d, mapping=aes(x=Percent, y=Likelihood)) +
+    ggtitle('Obama Winning Likelihood Based on HighSchool Graduate Percentage')+ xlab("Percentage of people that have completed HighScool or Higher ") + ylab("Likelihood of Obama Winning")
+
+##Plot 7: Bachelors Degree Percentage 
+max_perc = 50
+d <- data.frame(Percent=rep(0,max_perc), Likelihood=rep(0,max_perc))
+for (i in 1:max_perc){
+    da <- subset(election_data_train, subset=Bachelors>=i)
+    d[i,1] = i
+    d[i,2] = mean(da$Obama_wins)
+}
+ggplot() +
+    geom_line(d, mapping=aes(x=Percent, y=Likelihood)) +
+    ggtitle('Obama Winning Likelihood Based on Bachelors Graduate Percentage')+ xlab("Percentage of people that have completed Bachelors or Higher ") + ylab("Likelihood of Obama Winning")
+
+```
+
+
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Cmd+Option+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Cmd+Shift+K* to preview the HTML file). 
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+
